@@ -39,6 +39,11 @@ export interface AuthCheckOptions {
   delegations?: DelegationRecord[];
 }
 
+/** Explicit reassignment is the persisted workflow owner until the next stage transition. */
+export function isExplicitlyReassigned(evaluation: Evaluation): boolean {
+  return Boolean(evaluation.currentAssigneeId && evaluation.history?.[0]?.action === 'reassign_assignee');
+}
+
 /**
  * Check if an employee is within the organizational scope of a supervisor.
  *
@@ -283,6 +288,18 @@ export function canPerformWorkflowAction(
     }
   }
 
+  // Once explicitly reassigned, the previous organizational supervisor may
+  // still see the employee but cannot act as the owner of this workflow item.
+  if (isExplicitlyReassigned(evaluation) && evaluation.currentAssigneeId !== user.id) {
+    return { authorized: false, reason: 'این پرونده به مسئول دیگری واگذار شده است', author: { actorId: user.id, actorName: user.name, actorRole: user.role } };
+  }
+  if (isExplicitlyReassigned(evaluation) && evaluation.currentAssigneeId === user.id) {
+    const stage = evaluation.stage || 'self_review';
+    if (getStagesForUserAction(user.role, action).includes(stage)) {
+      return { authorized: true, reason: 'مسئول مجاز واگذارشده', author: { actorId: user.id, actorName: user.name, actorRole: user.role } };
+    }
+  }
+
   // EMPLOYEE: can only act on their OWN evaluation
   if (user.role === 'employee') {
     if (emp?.id === user.id) {
@@ -353,6 +370,13 @@ export function canViewEvaluation(
 
   const emp = employees.find(e => e.id === evaluation.empId);
   if (!emp) return false;
+
+  if (isExplicitlyReassigned(evaluation)) {
+    if (evaluation.currentAssigneeId === user.id) return true;
+    return ['approve', 'reject', 'reassign', 'advance'].some(action =>
+      hasActiveDelegation(user, evaluation, action, delegations, employees).granted
+    );
+  }
 
   // Employee can only see their own
   if (user.role === 'employee') {

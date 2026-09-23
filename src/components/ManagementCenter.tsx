@@ -175,7 +175,13 @@ export default function ManagementCenter({
     if (selectedEmpIds.size === 0) return;
     const targets = employees.filter(employee => selectedEmpIds.has(employee.id) && employee.username !== 'admin');
     try {
-      await Promise.all(targets.map(employee => updateCloudCredential({ username: employee.username }, 'DELETE')));
+      // P0 fix: single POST request with all usernames — NOT one DELETE per employee
+      await callPasswordApi('/api/auth/password', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'bulk_delete', usernames: targets.map(t => t.username) }),
+      });
     } catch (error) {
       setCredentialsFeedback({ type: 'error', message: error instanceof Error ? error.message : 'حذف امن حساب‌ها ناموفق بود.' });
       return;

@@ -9,7 +9,8 @@ interface Context {
 
 export async function onRequest(context: Context): Promise<Response> {
   const path = new URL(context.request.url).pathname;
-  if (path === '/api/health' || path === '/api/auth/login') return context.next();
+  if (path === '/api/health' || path === '/api/auth/login' || path === '/api/auth/logout') return context.next();
+  if (context.request.method === 'OPTIONS') return context.next();
 
   if (!context.env.CHALAK_DB) return jsonResponse({ error: 'CHALAK_DB binding is not configured.' }, 503);
   const session = await readSession(context.request, context.env);

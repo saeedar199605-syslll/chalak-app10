@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { calculateFinalScore } from '../utils/formulaEngine';
-import { canPerformWorkflowAction, canDelegate, isSelfDelegation, isDuplicateDelegation } from '../utils/workflowAuthorization';
+import { canPerformWorkflowAction, canDelegate, isSelfDelegation, isDuplicateDelegation, isExplicitlyReassigned, canViewEvaluation } from '../utils/workflowAuthorization';
 import { DelegationRecord } from '../utils/workflowAuthorization';
 import { createPortal } from 'react-dom';
 import {
@@ -132,26 +132,30 @@ export default function WorkflowManager({
   const [selectedUnit, setSelectedUnit] = useState<string>('all');
   const [nineBoxCategoryFilter, setNineBoxCategoryFilter] = useState<string>('all');
 
-  // Optimistic local state for immediate reconciliation without full page reload
+  // Optimistic local state for immediate reconciliation without full page reload.
+  // Guard against setting when content is identical (prevents render loops when
+  // parent re-renders with a new array reference but same data).
   const [localEvaluations, setLocalEvaluations] = useState<Evaluation[]>(evaluations);
+
+  // Reference-based guard: avoid JSON.stringify deep-compare on every prop change.
+  // Only sync when the reference actually changes (parent replaced the array data).
+  const lastEvaluationsRef = useRef(evaluations);
   useEffect(() => {
-    setLocalEvaluations(evaluations);
+    if (lastEvaluationsRef.current !== evaluations) {
+      lastEvaluationsRef.current = evaluations;
+      setLocalEvaluations(evaluations);
+    }
   }, [evaluations]);
 
   // Multi-select state for bulk actions
   const [selectedEvalIds, setSelectedEvalIds] = useState<string[]>([]);
 
-  // Route rules state
+  // Route rules state — source of truth is db (backed by localStorage + cloud sync).
+  // Never read raw localStorage here; always go through db.getMiscData so that
+  // cloud-synced state is respected and localStorage cannot override authoritative
+  // cloud data with stale values.
   const [routeRules, setRouteRules] = useState<EvaluationRouteRule[]>(() => {
-    const saved = localStorage.getItem('pe_route_rules');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return DEFAULT_ROUTE_RULES;
-      }
-    }
-    return DEFAULT_ROUTE_RULES;
+    return db.getMiscData<EvaluationRouteRule[]>('pe_route_rules', DEFAULT_ROUTE_RULES);
   });
 
   // Modal / Action states
@@ -220,7 +224,7 @@ export default function WorkflowManager({
       const nextLocal = localEvaluations.filter(e => e.id !== ev.id);
       setLocalEvaluations(nextLocal);
       db.saveEvaluations(nextLocal);
-      db.syncToCloudNow();
+      // syncToCloudNow removed — already debounced via setItem
     }
     displayToast('پرونده ارزیابی با موفقیت حذف گردید.', 'success');
     setEvalToDelete(null);
@@ -241,7 +245,7 @@ export default function WorkflowManager({
       const nextLocal = localEvaluations.filter(e => !selectedEvalIds.includes(e.id));
       setLocalEvaluations(nextLocal);
       db.saveEvaluations(nextLocal);
-      db.syncToCloudNow();
+      // syncToCloudNow removed — already debounced via setItem
     }
     displayToast(`${selectedEvalIds.length} پرونده با موفقیت از سیستم حذف گردید.`, 'success');
     setSelectedEvalIds([]);
@@ -300,7 +304,7 @@ export default function WorkflowManager({
 
     setLocalEvaluations(nextLocalEvaluations);
     db.saveEvaluations(nextLocalEvaluations);
-    db.syncToCloudNow();
+    // syncToCloudNow removed — already debounced via setItem
 
     if (onBulkUpdateEvaluations && updatedEvals.length > 0) {
       onBulkUpdateEvaluations(updatedEvals);
@@ -470,7 +474,12 @@ export default function WorkflowManager({
         }
       }
 
-      const assignee = resolveCurrentAssignee({ ...ev, stage }, emp);
+      const reassignedEmployee = isExplicitlyReassigned(ev)
+        ? employees.find(employee => employee.id === ev.currentAssigneeId)
+        : undefined;
+      const assignee = reassignedEmployee
+        ? { ...reassignedEmployee, title: 'مسئول واگذارشده' }
+        : resolveCurrentAssignee({ ...ev, stage }, emp);
       const score = calculateFinalScore(ev, profiles);
       const potential = ev.potentialScore || 3.5;
 
@@ -483,9 +492,9 @@ export default function WorkflowManager({
       return {
         ...ev,
         stage,
-        currentAssigneeId: assignee.id,
-        currentAssigneeName: assignee.name,
-        currentAssigneeRole: assignee.role,
+      currentAssigneeId: assignee.id,
+      currentAssigneeName: assignee.name,
+      currentAssigneeRole: assignee.role,
         potentialScore: potential,
         nineBoxPlacement: {
           performance: perfLevel,
@@ -525,6 +534,10 @@ export default function WorkflowManager({
       const emp = employees.find(e => e.id === ev.empId);
       if (!emp) return false;
 
+      // A reassigned task belongs to its persisted owner (or a scoped delegate),
+      // not automatically to the employee's former direct supervisor.
+      if (isExplicitlyReassigned(ev) && !canViewEvaluation(currentUser, ev, employees, delegations || [])) return false;
+
       // Admin has access to all workflow tasks across all stages (superuser rule)
       if (currentUser.role === 'admin') {
         if (stageFilter !== 'all' && ev.stage !== stageFilter) return false;
@@ -533,7 +546,7 @@ export default function WorkflowManager({
 
       // Supervisor tasks
       if (currentUser.role === 'supervisor') {
-        const isMyDirectSubordinate = emp.supervisorId === currentUser.id || (!emp.supervisorId && emp.unit === currentUser.unit);
+        const isMyDirectSubordinate = !isExplicitlyReassigned(ev) && (emp.supervisorId === currentUser.id || (!emp.supervisorId && emp.unit === currentUser.unit));
         const isAssignedToMe = ev.currentAssigneeId === currentUser.id;
         if ((isMyDirectSubordinate || isAssignedToMe) && (ev.stage === 'supervisor_review' || ev.stage === 'feedback_meeting' || ev.stage === 'peer_review' || ev.stage === 'rejected')) {
           if (stageFilter !== 'all' && ev.stage !== stageFilter) return false;
@@ -549,7 +562,7 @@ export default function WorkflowManager({
 
       return false;
     });
-  }, [normalizedEvaluations, selectedPeriod, currentUser, employees, stageFilter]);
+  }, [normalizedEvaluations, selectedPeriod, currentUser, employees, stageFilter, delegations]);
 
   // Filter for "All Workflows"
   const allFilteredEvaluations = useMemo(() => {
@@ -596,6 +609,9 @@ export default function WorkflowManager({
     };
   }, [normalizedEvaluations, selectedPeriod]);
 
+  // Track evaluations currently being transitioned to prevent double-submit / race conditions
+  const [pendingTransitionIds, setPendingTransitionIds] = useState<Set<string>>(new Set());
+
   // Execute stage transition
   const executeStageTransition = (
     evalItem: Evaluation,
@@ -604,15 +620,29 @@ export default function WorkflowManager({
     comment: string,
     targetAssigneeName?: string
   ) => {
-    // Authorization check: verify user can perform this workflow action
+    // SECURITY: Double-submit guard — reject if this evaluation is already being transitioned
+    if (pendingTransitionIds.has(evalItem.id)) return;
+    setPendingTransitionIds(prev => new Set(prev).add(evalItem.id));
+    try {
+    // Authorization check: verify user can perform this workflow action.
     // Map workflow transition actions to authorization permission types.
-    // SECURITY: default to 'approve' only for known approve-related actions;
-    // unknown actions must NOT silently map to privileged operations.
-    const action = act.includes('submit') ? 'advance' :
-                   act.includes('reject') ? 'reject' :
-                   act.includes('approve') || act.includes('resolve') || act.includes('complete') ? 'approve' :
-                   act.includes('appeal') ? 'appeal' :
-                   act.includes('reassign') ? 'reassign' : 'reject';
+    // SECURITY: unknown actions must FAIL CLOSED (default deny), not silently
+    // map to any privileged action. This prevents privilege escalation via
+    // unrecognized action strings.
+    let action: 'advance' | 'reject' | 'approve' | 'reassign' | 'appeal' | 'override';
+    if (act.includes('submit_appeal')) action = 'appeal';
+    else if (act.includes('submit')) action = 'advance';
+    else if (act.includes('reject')) action = 'reject';
+    else if (act.includes('approve')) action = 'approve';
+    else if (act.includes('resolve') || act.includes('complete')) action = 'approve';
+    else if (act.includes('reassign')) action = 'reassign';
+    else if (act === 'admin_override') action = 'override';
+    else if (act === 'advance') action = 'advance';
+    else {
+      // Unknown action — fail closed: deny authorization.
+      displayToast(`عملیات ناشناخته در گردش کار: ${act} — دسترسی رد شد.`, 'warning');
+      return;
+    }
     const authCheck = canPerformWorkflowAction(currentUser, evalItem, action, { employees, delegations });
     if (!authCheck.authorized) {
       displayToast(`دسترسی رد شد: ${authCheck.reason}`, 'warning');
@@ -667,7 +697,8 @@ export default function WorkflowManager({
     const nextLocal = localEvaluations.map(e => e.id === evalItem.id ? updatedEval : e);
     setLocalEvaluations(nextLocal);
     db.saveEvaluations(nextLocal);
-    db.syncToCloudNow();
+    // syncToCloudNow removed — db.setItem already triggers a debounced sync via
+    // triggerCloudSyncDebounced, preventing synchronous network storms.
 
     onUpdateEvaluation(evalItem.id, updatedEval);
     displayToast(`پرونده با موفقیت به مرحله «${WORKFLOW_STAGES[targetStage]?.label}» و کارتابل «${resolvedNextAssignee.name}» منتقل شد.`, 'success');
@@ -675,7 +706,14 @@ export default function WorkflowManager({
     setSelectedEvalForAction(null);
     setActionType(null);
     setActionComment('');
-  };
+    } finally {
+    setPendingTransitionIds(prev => {
+      const next = new Set(prev);
+      next.delete(evalItem.id);
+      return next;
+    });
+    }
+    };
 
   // Next standard step resolution
   const getNextStandardStage = (currentStage: WorkflowStageKey): WorkflowStageKey => {
@@ -775,9 +813,8 @@ export default function WorkflowManager({
     setLocalEvaluations(nextLocalEvaluations);
     setSelectedEvalIds([]);
 
-    // 2. Persist to storage & cloud immediately
+    // 2. Persist to storage (cloud sync is debounced automatically via setItem)
     db.saveEvaluations(nextLocalEvaluations);
-    db.syncToCloudNow();
 
     // 3. Notify parent
     if (onBulkUpdateEvaluations) {
@@ -793,10 +830,19 @@ export default function WorkflowManager({
   const handleApplyGroupedStage = (targetStage: WorkflowStageKey, actionTitle: string) => {
     if (selectedEvalIds.length === 0) return;
 
-    // Authorization: filter to only evaluations user is authorized to act on
+    // SECURITY: Bulk stage redirection to arbitrary stages (e.g., completed, hr_approval)
+    // is an admin_override action — requires admin role. The 'approve' authorization
+    // check alone is insufficient because supervisors could redirect to stages they
+    // don't have authority over.
+    if (currentUser.role !== 'admin') {
+      displayToast('دسترسی رد شد: این عملیات فقط برای مدیر سیستم مجاز است.', 'warning');
+      return;
+    }
+
+    // Authorization: filter *** only evaluations user is authorized to act on
     const authorizedEvals = localEvaluations.filter(ev => {
       if (!selectedEvalIds.includes(ev.id)) return false;
-      const authCheck = canPerformWorkflowAction(currentUser, ev, 'approve', { employees, delegations });
+      const authCheck = canPerformWorkflowAction(currentUser, ev, 'override', { employees, delegations });
       return authCheck.authorized;
     });
 
@@ -818,14 +864,14 @@ export default function WorkflowManager({
 
       const stageInfo = WORKFLOW_STAGES[targetStage];
       const fromStage = ev.stage;
-      const logEntry: WorkflowTransitionLog = {
+    const logEntry: WorkflowTransitionLog = {
         id: `trans-bulk-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         fromStage,
         toStage: targetStage,
         actorId: currentUser.id,
         actorName: currentUser.name,
         actorRole: currentUser.role,
-        action: 'advance',
+        action: 'admin_override',
         timestamp,
         comment: `اعمال گروهی (Batch Action): انتقال از ${WORKFLOW_STAGES[fromStage]?.label || fromStage} به ${stageInfo?.label || targetStage}`
       };
@@ -862,9 +908,8 @@ export default function WorkflowManager({
     setLocalEvaluations(nextLocalEvaluations);
     setSelectedEvalIds([]);
 
-    // 2. Persist to storage & cloud immediately
+    // 2. Persist to storage (cloud sync is debounced automatically via setItem)
     db.saveEvaluations(nextLocalEvaluations);
-    db.syncToCloudNow();
 
     // 3. Notify parent
     if (onBulkUpdateEvaluations) {
@@ -894,6 +939,12 @@ export default function WorkflowManager({
     else if (ev.stage === 'calibration_review') actionTypeLabel = 'approve_calibration';
     else if (ev.stage === 'hr_approval') actionTypeLabel = 'approve_hr';
     else if (ev.stage === 'feedback_meeting') actionTypeLabel = 'complete_feedback';
+    else if (ev.stage === 'rejected') actionTypeLabel = 'submit_supervisor'; // resubmit after correction
+    // 'appealed' stage: should NOT be quick-advanced — handled via appeals center
+    if (ev.stage === 'appealed') {
+      displayToast('پرونده‌های در حالت اعتراض از طریق سامانه فرجام‌خواهی پیگیری می‌شوند.', 'info');
+      return;
+    }
 
     executeStageTransition(ev, nextStage, actionTypeLabel, 'تایید و انتقال به مرحله بعدی از طریق کارتابل هوشمند');
   };
@@ -930,7 +981,7 @@ export default function WorkflowManager({
       onUpdateDelegations(updatedDelegations);
     } else {
       db.saveDelegations(updatedDelegations);
-      db.syncToCloudNow();
+      // syncToCloudNow removed — already debounced via setItem
     }
     displayToast(`واگذاری اختیار از سوی ${deleg.delegatorId} به ${deleg.delegateId} لغو گردید.`, 'success');
   };
@@ -997,7 +1048,7 @@ export default function WorkflowManager({
       onUpdateDelegations(updated);
     } else {
       db.saveDelegations(updated);
-      db.syncToCloudNow();
+      // syncToCloudNow removed — already debounced via setItem
     }
     displayToast('واگذاری اختیار جدید ثبت گردید.', 'success');
     setIsCreateDelegationModalOpen(false);
@@ -1091,19 +1142,22 @@ export default function WorkflowManager({
       submittedAt: new Intl.DateTimeFormat('fa-IR', { dateStyle: 'short', timeStyle: 'medium' }).format(new Date())
     };
 
-    executeStageTransition(
-      appealModalEval,
-      'appealed',
-      'submit_appeal',
-      `ثبت اعتراض رسمی شاغل نسبت به نتایج ارزیابی: ${appealReason}`
-    );
-
-    const updatedEval: Evaluation = {
+    // Build the full updated evaluation WITH appeal data BEFORE executing the stage
+    // transition, so that executeStageTransition's internal onUpdateEvaluation call
+    // includes the appeal object. This prevents the double-update bug where
+    // executeStageTransition would overwrite the appeal data set afterward.
+    const evalWithAppeal: Evaluation = {
       ...appealModalEval,
       stage: 'appealed',
       appeal: newAppeal
     };
-    onUpdateEvaluation(appealModalEval.id, updatedEval);
+
+    executeStageTransition(
+      evalWithAppeal,
+      'appealed',
+      'submit_appeal',
+      `ثبت اعتراض رسمی شاغل نسبت به نتایج ارزیابی: ${appealReason}`
+    );
     setAppealModalEval(null);
     setAppealReason('');
     setAppealCriteriaIds([]);
@@ -1123,19 +1177,23 @@ export default function WorkflowManager({
       adjustedScoreDelta: isAccepted ? reviewAppealScoreDelta : 0
     };
 
+    // Build the full updated evaluation WITH appeal update BEFORE executing the stage
+    // transition, so that executeStageTransition's internal onUpdateEvaluation call
+    // includes the updated appeal. This prevents the double-update bug.
+    const evalWithAppeal: Evaluation = {
+      ...appealModalEval,
+      stage: 'feedback_meeting',
+      appeal: updatedAppeal,
+      // Apply score delta if appeal accepted
+      scores: isAccepted ? appealModalEval.scores.map(s => ({ ...s, value: Math.min(100, Math.max(0, s.value + reviewAppealScoreDelta)) })) : appealModalEval.scores
+    };
+
     executeStageTransition(
-      appealModalEval,
+      evalWithAppeal,
       'feedback_meeting',
       'resolve_appeal',
       `رسیدگی به فرجام‌خواهی توسط کمیته (${isAccepted ? 'پذیرش و اصلاح' : 'رد اعتراض و تایید نهایی'}): ${reviewAppealNotes}`
     );
-
-    const updatedEval: Evaluation = {
-      ...appealModalEval,
-      stage: 'feedback_meeting',
-      appeal: updatedAppeal
-    };
-    onUpdateEvaluation(appealModalEval.id, updatedEval);
     setAppealModalEval(null);
     setReviewAppealNotes('');
   };
@@ -1305,7 +1363,7 @@ export default function WorkflowManager({
       </div>
 
       {/* --- NAVIGATION TABS --- */}
-      <div className="sticky top-0 z-30 flex border-b border-slate-800 gap-2 p-2 overflow-x-auto bg-slate-900/95 backdrop-blur-xl rounded-2xl shadow-xl">
+      <div className="workflow-tabs sticky top-0 z-30 flex border-b border-slate-800 gap-2 p-2 overflow-x-auto bg-slate-900/95 backdrop-blur-xl rounded-2xl shadow-xl" role="tablist" aria-label="بخش‌های گردش کار">
         <button
           onClick={() => setActiveTab('my_tasks')}
           className={`flex items-center gap-2 px-5 py-3 rounded-2xl font-bold text-xs transition-all shrink-0 ${
@@ -1436,7 +1494,10 @@ export default function WorkflowManager({
             {myTaskEvaluations.length > 0 && currentUser.role === 'admin' && (
               <button
                 onClick={() => {
-                  myTaskEvaluations.forEach(ev => handleQuickAdvance(ev));
+                  // BATCH: Reuse the existing optimized batch advance path instead of
+                  // calling handleQuickAdvance per-eval (which caused N separate saves + syncs).
+                  setSelectedEvalIds(myTaskEvaluations.map(e => e.id));
+                  setTimeout(() => handleApplyGroupedAdvance(), 0);
                 }}
                 className="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-md shadow-indigo-500/20"
               >
@@ -2378,13 +2439,13 @@ export default function WorkflowManager({
                             value={emp.supervisorId || ''}
                             onChange={e => {
                               const updatedEmp = { ...emp, supervisorId: e.target.value || undefined };
-                              const stored = JSON.parse(localStorage.getItem('pe_employees') || '[]');
-                              const storedIds = new Set(stored.map((item: Employee) => item.id));
+                              // SECURITY FIX: Use in-memory employees prop (cloud-synced state), NOT localStorage.
+                              const storedIds = new Set(employees.map(item => item.id));
                               let updatedList: Employee[];
 
                               if (storedIds.has(emp.id)) {
-                                // Employee exists in localStorage — update there
-                                updatedList = stored.map((item: Employee) =>
+                                // Employee exists in updated list — replace in place
+                                updatedList = employees.map(item =>
                                   item.id === emp.id ? updatedEmp : item
                                 );
                               } else {
@@ -2410,8 +2471,10 @@ export default function WorkflowManager({
                             value={emp.peerReviewerId || ''}
                             onChange={e => {
                               const updatedEmp = { ...emp, peerReviewerId: e.target.value || undefined };
-                              const stored = JSON.parse(localStorage.getItem('pe_employees') || '[]');
-                              const updatedList = stored.map((item: Employee) => item.id === emp.id ? updatedEmp : item);
+                              // SECURITY FIX: Use in-memory employees prop, NOT localStorage.
+                              const updatedList: Employee[] = employees.map(item =>
+                                item.id === emp.id ? { ...item, ...updatedEmp } : item
+                              );
                               db.saveEmployees(updatedList);
                               if (onUpdateEmployees) onUpdateEmployees(updatedList);
                             }}
@@ -2429,8 +2492,10 @@ export default function WorkflowManager({
                             value={emp.approverId || 'emp-admin'}
                             onChange={e => {
                               const updatedEmp = { ...emp, approverId: e.target.value || undefined };
-                              const stored = JSON.parse(localStorage.getItem('pe_employees') || '[]');
-                              const updatedList = stored.map((item: Employee) => item.id === emp.id ? updatedEmp : item);
+                              // SECURITY FIX: Use in-memory employees prop, NOT localStorage.
+                              const updatedList: Employee[] = employees.map(item =>
+                                item.id === emp.id ? { ...item, ...updatedEmp } : item
+                              );
                               db.saveEmployees(updatedList);
                               if (onUpdateEmployees) onUpdateEmployees(updatedList);
                             }}

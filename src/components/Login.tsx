@@ -11,11 +11,10 @@ import {
   ArrowLeft, 
   Lock, 
   Users, 
-  Eye, 
-  EyeOff, 
+  Eye,
+  EyeOff,
   AlertCircle,
   Clock,
-  CheckCircle2
 } from 'lucide-react';
 import { Employee, UserRole } from '../types';
 import InteractiveEyes from './InteractiveEyes';
@@ -160,8 +159,9 @@ export default function Login({ employees, onLogin, theme }: LoginProps) {
         });
         if (lifecycle !== loginLifecycle.current) return;
         const contentType = response.headers.get('Content-Type') || '';
+        let result: { user?: Employee; error?: string } = {};
         if (contentType.includes('application/json')) {
-          const result = await response.json() as { user?: Employee; error?: string };
+          result = await response.json() as { user?: Employee; error?: string };
           if (lifecycle !== loginLifecycle.current) return;
           if (!response.ok || !result.user) {
             triggerFailedAttempt(result.error || 'نام کاربری یا کلمه عبور نامعتبر است.');
@@ -175,15 +175,44 @@ export default function Login({ employees, onLogin, theme }: LoginProps) {
           logSecurityEvent('ورود موفق ابری', `کاربر ${result.user.name} با نشست امن وارد سیستم شد.`, 'success');
           onLogin(result.user);
           return;
+        } else {
+          // Non-JSON response — determine the specific failure by status code.
+          if (!import.meta.env.DEV || activeTab === 'admin') {
+            let specificError: string;
+            switch (response.status) {
+              case 0:
+              case null:
+                specificError = 'اتصال به سرور برقرار نشد. لطفاً دوباره تلاش کنید.';
+                break;
+              case 404:
+                specificError = 'سرویس احراز هویت یافت نشد. لطفاً با مدیر سامانه تماس بگیرید.';
+                break;
+              case 405:
+                specificError = 'روش درخواست نامعتبر است. لطفاً با مدیر سامانه تماس بگیرید.';
+                break;
+              case 502:
+              case 503:
+              case 504:
+                specificError = 'سرویس احراز هویت در دسترس نیست. لطفاً با مدیر سامانه تماس بگیرید.';
+                break;
+              default:
+                specificError = response.ok
+                  ? 'پاسخی نامعتبر از سرور دریافت شد. لطفاً با مدیر سامانه تماس بگیرید.'
+                  : `خطای سرور (کد ${response.status}). لطفاً دوباره تلاش کنید.`;
+            }
+            setErrorMsg(specificError);
+            // In production or for admin tab, do not fall through to local auth.
+            return;
+          }
+          // Vite-only development: non-JSON response falls through to local demo authentication below.
         }
-        if (!import.meta.env.DEV || activeTab === 'admin') {
-          setErrorMsg('سرویس احراز هویت در دسترس نیست. لطفاً با مدیر سامانه تماس بگیرید.');
-          return;
-        }
-      } catch {
+      } catch (err) {
         if (lifecycle !== loginLifecycle.current) return;
         if (!import.meta.env.DEV || activeTab === 'admin') {
           setErrorMsg('ارتباط امن با سرور برقرار نشد. لطفاً دوباره تلاش کنید.');
+          if (err instanceof Error) {
+            console.error('[AUTH] Network error during login:', err.message);
+          }
           return;
         }
         // Vite-only development has no Pages Functions; continue with local demo authentication.

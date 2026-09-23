@@ -334,6 +334,82 @@ html.light-theme .border-amber-500\/20 {
   border-color: rgba(234, 88, 12, 0.15) !important;
 }
 
+/* Shared interaction and responsive tokens used across production screens. */
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid #0ea5a4;
+  outline-offset: 2px;
+}
+
+:where(button, input, select, textarea) {
+  font: inherit;
+}
+
+.workflow-tabs {
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #64748b transparent;
+  scroll-padding-inline: 0.75rem;
+}
+
+.workflow-tabs > button {
+  min-height: 2.75rem;
+  scroll-snap-align: start;
+}
+
+.table-responsive,
+.table-container,
+.overflow-x-auto {
+  max-width: 100%;
+  overscroll-behavior-inline: contain;
+}
+
+@media (max-width: 640px) {
+  main,
+  main > div,
+  main section,
+  main article {
+    min-width: 0;
+  }
+
+  .workflow-tabs {
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .workflow-tabs > button {
+    flex: 0 0 auto;
+    max-width: min(82vw, 18rem);
+    white-space: nowrap;
+  }
+
+  .table-responsive table,
+  .table-container table,
+  .overflow-x-auto table {
+    min-width: 46rem;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    max-width: 100%;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    min-width: 1rem;
+    min-height: 1rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 /* Print Optimization & High-Fidelity A4 PDF Export */
 @media print {
   @page {

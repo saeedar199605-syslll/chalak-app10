@@ -27,6 +27,7 @@ export const CLOUD_SYNC_KEYS = new Set([
   'pe_auto_archive_settings',
   'pe_system_logs',
   'pe_audit_logs',
+  'pe_route_rules',
   'pe_delegations',
 ]);
 

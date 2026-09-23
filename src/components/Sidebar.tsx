@@ -168,7 +168,7 @@ export default function Sidebar({
               <button
                 type="button"
                 onClick={onCloseMobile}
-                className="md:hidden p-1.5 rounded-lg bg-slate-800/40 text-slate-400 hover:text-white cursor-pointer"
+                className="md:hidden grid min-h-10 min-w-10 place-items-center rounded-lg bg-slate-800/40 text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -218,7 +218,7 @@ export default function Sidebar({
                           type="button"
                           onClick={() => handleTabClick(item.id)}
                           title={item.label}
-                          className={`flex items-center justify-between w-full px-3 py-2 rounded-xl text-right text-xs font-bold transition-all cursor-pointer ${
+                          className={`flex min-h-11 items-center justify-between w-full px-3 py-2.5 rounded-xl text-right text-xs font-bold transition-all cursor-pointer ${
                             isActive 
                               ? theme === 'dark'
                                 ? 'bg-emerald-500/15 text-emerald-300 font-black border-r-3 border-emerald-500 shadow-sm'
@@ -278,7 +278,7 @@ export default function Sidebar({
             <button
               type="button"
               onClick={onToggleTheme}
-              className={`p-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 text-xs font-bold ${
+              className={`min-h-10 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 px-2 text-xs font-bold ${
                 theme === 'dark' ? 'hover:bg-slate-800 text-amber-400' : 'hover:bg-slate-200 text-indigo-600'
               }`}
               title={theme === 'dark' ? 'حالت روز' : 'حالت شب'}
@@ -290,7 +290,7 @@ export default function Sidebar({
             <button
               type="button"
               onClick={onLogout}
-              className="p-1.5 rounded-lg transition-all cursor-pointer text-rose-400 hover:bg-rose-500/10 flex items-center gap-1 text-[11px] font-bold"
+              className="min-h-10 rounded-lg transition-all cursor-pointer text-rose-400 hover:bg-rose-500/10 flex items-center gap-1 px-2 text-[11px] font-bold"
               title="خروج از حساب"
             >
               <LogOut className="w-3.5 h-3.5" />

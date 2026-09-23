@@ -6,6 +6,7 @@ import React, { lazy, Suspense, useState, useEffect, useCallback } from 'react';
 import Sidebar from './components/Sidebar';
 import Login from './components/Login';
 import SupervisorNotificationBell from './components/SupervisorNotificationBell';
+import { IconButton } from './components/ui/Primitives';
 const Dashboard = lazy(() => import('./components/Dashboard'));
 const CriteriaBank = lazy(() => import('./components/CriteriaBank'));
 const JobProfiles = lazy(() => import('./components/JobProfiles'));
@@ -660,6 +661,22 @@ export default function App() {
     }
   };
 
+  const removeCloudCredentialsBulk = async (usernames: string[]): Promise<boolean> => {
+    if (usernames.length === 0) return true;
+    try {
+      const response = await fetch('/api/auth/password', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'bulk_delete', usernames }),
+      });
+      const isApiResponse = (response.headers.get('Content-Type') || '').includes('application/json');
+      return !isApiResponse && import.meta.env.DEV ? true : response.ok;
+    } catch {
+      return import.meta.env.DEV;
+    }
+  };
+
   const handleDeleteEmployee = async (id: string): Promise<boolean> => {
     const target = employees.find(e => e.id === id);
     if (!target) return false;
@@ -688,9 +705,9 @@ export default function App() {
   const handleBulkDeleteEmployees = async (ids: string[]): Promise<boolean> => {
     if (!ids || ids.length === 0) return false;
     const targets = employees.filter(employee => ids.includes(employee.id) && employee.username !== 'admin');
-    const credentialsRemoved = await Promise.all(targets.map(employee => removeCloudCredential(employee.username)));
-    if (credentialsRemoved.some(success => !success)) {
-      alert('حذف بخشی از اطلاعات ورود از سرور ناموفق بود؛ عملیات گروهی متوقف شد.');
+    // Single bulk credential deletion — ONE request, not N per employee.
+    if (!(await removeCloudCredentialsBulk(targets.map(t => t.username).filter(Boolean)))) {
+      alert('حذف اطلاعات ورود گروهی از سرور ناموفق بود؛ عملیات گروهی متوقف شد.');
       return false;
     }
     const res = db.deleteEmployeesBatch(ids);
@@ -875,26 +892,25 @@ export default function App() {
       
       <header className={`md:hidden flex items-center justify-between px-4 py-3 border-b z-30 shrink-0 ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-sm'}`}>
         <div className="flex items-center gap-2.5">
-          <button type="button" onClick={() => setIsMobileMenuOpen(true)} className="p-2 rounded-xl bg-slate-800/20 text-teal-400 hover:bg-slate-800/40 transition-colors cursor-pointer" aria-label="منو">
+          <IconButton onClick={() => setIsMobileMenuOpen(true)} className="border-transparent bg-transparent text-teal-500 hover:bg-slate-800/50" label="منو">
             <Menu className="w-5 h-5" />
-          </button>
+          </IconButton>
           <span className="text-xs font-black tracking-tight">{getTabTitle(currentTab)}</span>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            type="button"
+          <IconButton
             onClick={handleForceCloudSync}
             disabled={cloudStatus.status === 'syncing'}
             title={cloudStatus.message}
+            label={cloudStatus.message}
             className={`p-1.5 rounded-xl border transition-colors ${
               cloudStatus.status === 'synced' ? 'text-sky-400 bg-sky-500/10 border-sky-500/20' :
               cloudStatus.status === 'syncing' ? 'text-amber-400 bg-amber-500/10 border-amber-500/20' :
               'text-rose-400 bg-rose-500/10 border-rose-500/20'
             }`}
-            aria-label={cloudStatus.message}
           >
             <RefreshCw className={`w-4 h-4 ${cloudStatus.status === 'syncing' ? 'animate-spin' : ''}`} />
-          </button>
+          </IconButton>
           <button 
             type="button" 
             onClick={() => setIsManualModalOpen(true)} 
@@ -910,9 +926,9 @@ export default function App() {
             onNavigate={setCurrentTab}
             theme={theme}
           />
-          <button type="button" onClick={handleToggleTheme} className="p-1.5 rounded-xl bg-slate-800/20 text-slate-400 hover:text-slate-200 cursor-pointer">
+          <IconButton onClick={handleToggleTheme} className="border-transparent bg-transparent" label="تغییر پوسته">
             {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-indigo-600" />}
-          </button>
+          </IconButton>
         </div>
       </header>
 

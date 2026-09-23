@@ -21,7 +21,12 @@ interface StateEnvelope {
 }
 
 type EmployeeRecord = { id: string; username?: string; supervisorId?: string };
-type EvaluationRecord = { id: string; empId: string };
+type EvaluationRecord = {
+  id: string;
+  empId: string;
+  currentAssigneeId?: string;
+  history?: Array<{ action?: string }>;
+};
 
 async function readState(env: CloudflareEnv): Promise<{ state: CloudState; meta: StateMeta }> {
   const [rawState, rawMeta] = await Promise.all([
@@ -54,15 +59,45 @@ function allowedEmployeeIds(state: CloudState, session: AuthSession): Set<string
   );
 }
 
+function isExplicitReassignment(evaluation: EvaluationRecord | undefined): boolean {
+  return Boolean(evaluation?.currentAssigneeId && evaluation.history?.[0]?.action === 'reassign_assignee');
+}
+
+function canAccessEvaluation(evaluation: EvaluationRecord, state: CloudState, session: AuthSession): boolean {
+  if (session.role === 'admin') return true;
+  if (isExplicitReassignment(evaluation)) return evaluation.currentAssigneeId === session.id;
+  return allowedEmployeeIds(state, session).has(evaluation.empId);
+}
+
+function hasAuthorizedEvaluationChanges(current: CloudState, changes: CloudState, session: AuthSession): boolean {
+  if (session.role === 'admin' || !Array.isArray(changes.pe_evaluations)) return true;
+  const employees = Array.isArray(current.pe_employees) ? current.pe_employees as EmployeeRecord[] : [];
+  const byId = new Map((Array.isArray(current.pe_evaluations) ? current.pe_evaluations as EvaluationRecord[] : []).map(item => [item.id, item]));
+  return (changes.pe_evaluations as EvaluationRecord[]).every(incoming => {
+    if (!incoming?.id || !incoming.empId) return false;
+    const existing = byId.get(incoming.id);
+    if (isExplicitReassignment(existing)) return existing?.currentAssigneeId === session.id;
+    return employees.some(employee => employee.id === incoming.empId && (
+      employee.id === session.id || (session.role === 'supervisor' && employee.supervisorId === session.id)
+    ));
+  });
+}
+
 function scopedState(state: CloudState, session: AuthSession): CloudState {
   if (session.role === 'admin') return state;
   const employees = Array.isArray(state.pe_employees) ? state.pe_employees as EmployeeRecord[] : [];
   const allowedIds = allowedEmployeeIds(state, session);
   const result: CloudState = { ...state };
   if (Array.isArray(state.pe_evaluations)) {
-    result.pe_evaluations = (state.pe_evaluations as EvaluationRecord[]).filter(item => allowedIds.has(item.empId));
+    const evaluations = state.pe_evaluations as EvaluationRecord[];
+    result.pe_evaluations = evaluations.filter(item => canAccessEvaluation(item, state, session));
+    const assignedEmployeeIds = new Set(evaluations.filter(item =>
+      isExplicitReassignment(item) && item.currentAssigneeId === session.id
+    ).map(item => item.empId));
+    allowedIds.forEach(id => assignedEmployeeIds.add(id));
+    result.pe_employees = employees.filter(employee => assignedEmployeeIds.has(employee.id));
   }
-  result.pe_employees = employees.filter(employee => allowedIds.has(employee.id));
+  if (!Array.isArray(state.pe_evaluations)) result.pe_employees = employees.filter(employee => allowedIds.has(employee.id));
   for (const key of [
     'pe_reward_config', 'pe_reward_batch_history', 'pe_system_logs', 'pe_audit_logs',
     'pe_role_permissions', 'pe_user_custom_permissions', 'pe_locked_users',
@@ -76,7 +111,12 @@ function mergeAuthorizedState(current: CloudState, changes: CloudState, session:
   const allowedIds = allowedEmployeeIds(current, session);
   if (Array.isArray(changes.pe_evaluations)) {
     const currentEvaluations = Array.isArray(current.pe_evaluations) ? current.pe_evaluations as EvaluationRecord[] : [];
-    const incoming = (changes.pe_evaluations as EvaluationRecord[]).filter(item => item?.id && allowedIds.has(item.empId));
+    const currentById = new Map(currentEvaluations.map(item => [item.id, item]));
+    const incoming = (changes.pe_evaluations as EvaluationRecord[]).filter(item => {
+      const existing = currentById.get(item?.id);
+      if (isExplicitReassignment(existing)) return existing?.currentAssigneeId === session.id;
+      return item?.id && allowedIds.has(item.empId);
+    });
     const byId = new Map(currentEvaluations.map(item => [item.id, item]));
     incoming.forEach(item => byId.set(item.id, item));
     next.pe_evaluations = Array.from(byId.values());
@@ -120,6 +160,9 @@ export async function onRequestPost({ request, env, data }: Context): Promise<Re
       revision: currentMeta.revision,
       updatedAt: currentMeta.updatedAt,
     }, 409);
+  }
+  if (!hasAuthorizedEvaluationChanges(current, changes, data.session)) {
+    return jsonResponse({ error: 'شما مسئول مجاز این پرونده گردش کار نیستید.' }, 403);
   }
   const next = mergeAuthorizedState(current, changes, data.session);
   const meta: StateMeta = {
